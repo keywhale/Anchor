@@ -18,13 +18,11 @@ import keywhale.bukkit.util.loader.op.SaveOperation;
 public abstract class Loader<ID, VAL> {
 
     private final JavaPlugin plugin;
-    
     private final Object lock = new Object();
-
     private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
-
     private final Set<Thread> illegalThreads = new HashSet<>();
-    
+    private boolean isShutdown = false;
+
     public Loader(JavaPlugin plugin) {
         this.plugin = plugin;
     }
@@ -48,30 +46,67 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
+    public static class ShuttingDownException extends IllegalStateException {}
+
+    private void checkShutdown() {
+        if (this.isShutdown) {
+            throw new ShuttingDownException();
+        }
+    }
+
     public void access(
         @Nullable ID identifier,
         Accessor<ID, VAL> accessor,
         @Nullable Runnable onNotFound
     ) {
-        this.runSync(() -> {
-            synchronized (this.lock) {
-                this.access0(identifier, accessor, onNotFound);
+        synchronized (this.lock) {
+            this.checkShutdown();
+
+            this.runSync(() -> {
+                synchronized (this.lock) {
+                    this.access0(identifier, accessor, onNotFound);
+                }
+            });
+        }
+    }
+
+    public void shutdown() {
+        synchronized (this.lock) {
+            if (this.isShutdown) {
+                return;
             }
-        });
+
+            this.isShutdown = true;
+
+            this.runSync(() -> {
+                synchronized (this.lock) {
+                    Map<ID, StateTracker<ID, VAL>> trackersCopy
+                        = new HashMap<>(this.trackers);
+                    
+                    for (StateTracker<ID, VAL> tracker : trackersCopy.values()) {
+                        tracker.shutdown();
+                    }
+                }
+            });
+        }
     }
 
     public void delete(ID identifier) {
-        this.runSync(() -> {
-            synchronized (this.lock) {
-                StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
+        synchronized (this.lock) {
+            this.checkShutdown();
 
-                if (tracker == null) {
-                    this.deleteReplaceTracker(identifier);
-                } else {
-                    tracker.delete();
+            this.runSync(() -> {
+                synchronized (this.lock) {
+                    StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
+
+                    if (tracker == null) {
+                        this.deleteReplaceTracker(identifier);
+                    } else {
+                        tracker.delete();
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     // Under Lock
@@ -185,6 +220,7 @@ public abstract class Loader<ID, VAL> {
     private interface StateTracker<ID, VAL> {
         void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound);
         void delete();
+        void shutdown();
     }
 
     private class ActiveStateTracker implements StateTracker<ID, VAL> {
@@ -193,6 +229,8 @@ public abstract class Loader<ID, VAL> {
         private final VAL value;
 
         private final Set<Accessor<ID, VAL>> accessors = new HashSet<>();
+            
+        private boolean isShuttingDown = false;
 
         ActiveStateTracker(ID identifier, VAL value) {
             this.identifier = identifier;
@@ -215,7 +253,7 @@ public abstract class Loader<ID, VAL> {
         }
 
         private boolean isActive() {
-            return (Loader.this.trackers.get(this.identifier) == this);
+            return ((Loader.this.trackers.get(this.identifier) == this) && !this.isShuttingDown);
         }
 
         private boolean provisionAccess(Accessor<ID, VAL> accessor) {
@@ -299,6 +337,22 @@ public abstract class Loader<ID, VAL> {
             }
         }
 
+        @Override
+        public void shutdown() {
+            this.isShuttingDown = true;
+
+            try {
+                Loader.this.illegalThreads.add(Thread.currentThread());
+                for (var accessor : this.accessors) {
+                    accessor.cancel(); // handle exception?
+                }
+            } finally {
+                Loader.this.illegalThreads.remove(Thread.currentThread());
+                this.accessors.clear();
+                Loader.this.unload(this.identifier, this.value);
+            }
+        }
+
     }
 
     private class UnloadingStateTracker implements StateTracker<ID, VAL> {
@@ -307,7 +361,9 @@ public abstract class Loader<ID, VAL> {
         private final VAL value;
 
         private final List<PendingAccessRequest> pendingAccess = new ArrayList<>();
+
         private boolean pendingDelete = false;
+        private boolean pendingShutdown = false;
 
         UnloadingStateTracker(ID identifier, VAL value) {
             this.identifier = identifier;
@@ -327,7 +383,10 @@ public abstract class Loader<ID, VAL> {
         public void onComplete() {
             Loader.this.trackers.remove(this.identifier);
 
-            if (this.pendingDelete) {
+            if (this.pendingShutdown) {
+                this.pendingAccess.clear();
+                this.pendingDelete = false;
+            } else if (this.pendingDelete) {
                 try {
                     Loader.this.illegalThreads.add(Thread.currentThread());
                     for (var par : this.pendingAccess) {
@@ -353,6 +412,11 @@ public abstract class Loader<ID, VAL> {
             this.pendingDelete = true;
         }
 
+        @Override
+        public void shutdown() {
+            this.pendingShutdown = true;
+        }
+
     }
 
     private class DeletingStateTracker implements StateTracker<ID, VAL> {
@@ -364,6 +428,11 @@ public abstract class Loader<ID, VAL> {
 
         @Override
         public void delete() {
+            // Into the void...
+        }
+
+        @Override
+        public void shutdown() {
             // Into the void...
         }
 
