@@ -286,7 +286,7 @@ public abstract class Loader<ID, VAL> {
 
             this.runSync(() -> {
                 synchronized (this.lock) {
-                    tracker.onComplete(onSaveException);
+                    tracker.onComplete();
                 }
             });
         });
@@ -430,8 +430,7 @@ public abstract class Loader<ID, VAL> {
         }
 
         public void loadPending(
-            List<PendingAccessRequest> pars, 
-            @NonNull SaveOperationExceptionHandler onSaveException
+            List<PendingAccessRequest> pars
         ) {
             var roller = new RuntimeExceptionRoller();
             for (var par : pars) {
@@ -442,7 +441,7 @@ public abstract class Loader<ID, VAL> {
                 roller.raise();
             } finally {
                 if (this.accessors.isEmpty()) {
-                    Loader.this.unload(this.identifier, this.value, onSaveException);
+                    Loader.this.unload(this.identifier, this.value, pars.get(0).onSaveException);
                 }
             }
         }
@@ -585,7 +584,7 @@ public abstract class Loader<ID, VAL> {
             this.pendingAccess.add(par);
         }
 
-        public void onComplete(SaveOperationExceptionHandler onSaveException) {
+        public void onComplete() {
             Loader.this.trackers.remove(this.identifier);
 
             if (this.pendingShutdown) {
@@ -610,7 +609,7 @@ public abstract class Loader<ID, VAL> {
                     = new ActiveStateTracker(this.identifier, this.value);
                 Loader.this.trackers.put(this.identifier, activeTracker);
 
-                activeTracker.loadPending(this.pendingAccess, onSaveException);
+                activeTracker.loadPending(this.pendingAccess);
             }
         }
 
