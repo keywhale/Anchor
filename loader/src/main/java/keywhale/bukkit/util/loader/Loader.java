@@ -30,6 +30,7 @@ public abstract class Loader<ID, VAL> {
     private final JavaPlugin plugin;
     private final Object lock = new Object();
     private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
+    private final Set<Runnable> pendingRunnables = new HashSet<>();
     private boolean isShutdown = false;
 
     public Loader(JavaPlugin plugin) {
@@ -37,14 +38,34 @@ public abstract class Loader<ID, VAL> {
     }
 
     private void runAsync(Runnable r) {
+        synchronized (this.lock) {
+            this.pendingRunnables.add(r);
+        }
         this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
-            r.run();
+            boolean shouldRun;
+            synchronized (this.lock) {
+                shouldRun = this.pendingRunnables.remove(r);
+            }
+
+            if (shouldRun) {
+                r.run();
+            }
         });
     }
 
     private void runSync(Runnable r) {
+        synchronized (this.lock) {
+            this.pendingRunnables.add(r);
+        }
         this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
-            r.run();
+            boolean shouldRun;
+            synchronized (this.lock) {
+                shouldRun = this.pendingRunnables.remove(r);
+            }
+
+            if (shouldRun) {
+                r.run();
+            }
         });
     }
 
@@ -632,6 +653,17 @@ public abstract class Loader<ID, VAL> {
     // This should NOT call any methods on Loader
     protected abstract DeleteOperation opDelete(ID identifier);
 
-    // TODO: Implement Expediting
+    public void expedite() {
+        synchronized (this.lock) {
+            while (!this.pendingRunnables.isEmpty()) {
+                var pendingRunnablesCopy = new HashSet<>(this.pendingRunnables);
+                this.pendingRunnables.clear();
+
+                for (var pr : pendingRunnablesCopy) {
+                    pr.run();
+                }
+            }
+        }
+    }
     
 }
