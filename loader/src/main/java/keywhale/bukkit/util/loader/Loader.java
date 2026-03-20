@@ -394,6 +394,52 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
+    private static class CompositeSaveOperationExceptionHandler implements SaveOperationExceptionHandler {
+
+        private final List<SaveOperationExceptionHandler> handlers;
+
+        CompositeSaveOperationExceptionHandler(List<SaveOperationExceptionHandler> handlers) {
+            this.handlers = handlers;
+        }
+
+        @Override
+        public void handlePart1(Part1SaveOperationException exc) {
+            var roller = new RuntimeExceptionRoller();
+            for (var handler : this.handlers) {
+                roller.exec(() -> handler.handlePart1(exc));
+            }
+            roller.raise();
+        }
+
+        @Override
+        public void handlePart1(RuntimeException exc) {
+            var roller = new RuntimeExceptionRoller();
+            for (var handler : this.handlers) {
+                roller.exec(() -> handler.handlePart1(exc));
+            }
+            roller.raise();
+        }
+
+        @Override
+        public void handlePart2(Part2SaveOperationException exc) {
+            var roller = new RuntimeExceptionRoller();
+            for (var handler : this.handlers) {
+                roller.exec(() -> handler.handlePart2(exc));
+            }
+            roller.raise();
+        }
+
+        @Override
+        public void handlePart2(RuntimeException exc) {
+            var roller = new RuntimeExceptionRoller();
+            for (var handler : this.handlers) {
+                roller.exec(() -> handler.handlePart2(exc));
+            }
+            roller.raise();
+        }
+
+    }
+
     private interface StateTracker<ID, VAL> {
         void access(
             Accessor<ID, VAL> accessor, 
@@ -441,7 +487,9 @@ public abstract class Loader<ID, VAL> {
                 roller.raise();
             } finally {
                 if (this.accessors.isEmpty()) {
-                    Loader.this.unload(this.identifier, this.value, pars.get(0).onSaveException);
+                    Loader.this.unload(this.identifier, this.value, new CompositeSaveOperationExceptionHandler(
+                        pars.stream().map(par -> par.onSaveException).toList()
+                    ));
                 }
             }
         }
