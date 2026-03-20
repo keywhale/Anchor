@@ -655,14 +655,18 @@ public abstract class Loader<ID, VAL> {
 
     public void expedite() {
         synchronized (this.lock) {
+            RuntimeExceptionRoller roller = new RuntimeExceptionRoller();
+
             while (!this.pendingRunnables.isEmpty()) {
                 var pendingRunnablesCopy = new HashSet<>(this.pendingRunnables);
                 this.pendingRunnables.clear();
 
                 for (var pr : pendingRunnablesCopy) {
-                    pr.run();
+                    roller.exec(pr);
                 }
             }
+            
+            roller.raise();
         }
     }
     
