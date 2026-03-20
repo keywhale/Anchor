@@ -35,7 +35,9 @@ public interface Accessor<ID, VAL> {
 
             @Override
             public void cancel() {
-                this.cancel.run();
+                if (this.cancel != null) {
+                    this.cancel.run();
+                }
             }
             
         };
