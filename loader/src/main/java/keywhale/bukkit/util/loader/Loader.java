@@ -279,10 +279,30 @@ public abstract class Loader<ID, VAL> {
 
     // Under Lock
     // Only called while active
-    private void unload(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler onSaveException) {
+    private void unloadOnSyncThread(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler onSaveException) {
         UnloadingStateTracker tracker = new UnloadingStateTracker(identifier, value);
         this.trackers.put(identifier, tracker);
 
+        this.unloadAfterTracker(identifier, value, onSaveException, tracker);
+    }
+
+    private void unloadFromAnyThread(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler onSaveException) {
+        UnloadingStateTracker tracker = new UnloadingStateTracker(identifier, value);
+        this.trackers.put(identifier, tracker);
+
+        if (this.plugin.getServer().isPrimaryThread()) {
+            this.unloadAfterTracker(identifier, value, onSaveException, tracker);
+        } else {
+            this.runSync(() -> this.unloadAfterTracker(identifier, value, onSaveException, tracker));
+        }
+    }
+
+    private void unloadAfterTracker(
+        ID identifier, 
+        VAL value, 
+        @NonNull SaveOperationExceptionHandler onSaveException,
+        UnloadingStateTracker tracker
+    ) {
         AtomicBoolean failedPart1 = new AtomicBoolean();
 
         SaveOperation op = this.opSave(identifier, value);
@@ -360,7 +380,7 @@ public abstract class Loader<ID, VAL> {
                                 = activeTracker.provisionAccess(accessor, onSaveException);
 
                             if (doneDuringInit) {
-                                this.unload(op.id(), op.value(), onSaveException);
+                                this.unloadOnSyncThread(op.id(), op.value(), onSaveException);
                             } else {
                                 this.trackers.put(op.id(), activeTracker);
                             }
@@ -510,7 +530,7 @@ public abstract class Loader<ID, VAL> {
                 roller.raise();
             } finally {
                 if (this.accessors.isEmpty()) {
-                    Loader.this.unload(this.identifier, this.value, new CompositeSaveOperationExceptionHandler(
+                    Loader.this.unloadOnSyncThread(this.identifier, this.value, new CompositeSaveOperationExceptionHandler(
                         pars.stream().map(par -> par.onSaveException).toList()
                     ));
                 }
@@ -564,7 +584,7 @@ public abstract class Loader<ID, VAL> {
                                     ast.accessors.remove(accessor);
 
                                     if (ast.accessors.isEmpty()) {
-                                        Loader.this.unload(ast.identifier, ast.value, onSaveException);
+                                        Loader.this.unloadFromAnyThread(ast.identifier, ast.value, onSaveException);
                                     }
                                 }
                             }
@@ -617,7 +637,7 @@ public abstract class Loader<ID, VAL> {
                 roller.raise();
             } finally {
                 this.accessors.clear();
-                Loader.this.unload(this.identifier, this.value, onSaveException);
+                Loader.this.unloadOnSyncThread(this.identifier, this.value, onSaveException);
             }
         }
 
