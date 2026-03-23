@@ -93,8 +93,8 @@ public abstract class Loader<ID, VAL> {
         @Nullable ID identifier,
         Accessor<ID, VAL> accessor,
         @Nullable Runnable onNotFound,
-        @Nullable AccessOperationExceptionHandler onAccessException,
-        @Nullable SaveOperationExceptionHandler onSaveException
+        @Nullable AccessOperationExceptionHandler<ID> onAccessException,
+        @Nullable SaveOperationExceptionHandler<ID, VAL> onSaveException
     ) {
         synchronized (this.lock) {
             this.checkShutdown();
@@ -113,7 +113,7 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    public void shutdownAndExpedite(@Nullable SaveOperationExceptionHandler onSaveException) {
+    public void shutdownAndExpedite(@Nullable SaveOperationExceptionHandler<ID, VAL> onSaveException) {
         synchronized (this.lock) {
             if (this.isShutdown) {
                 return;
@@ -149,11 +149,11 @@ public abstract class Loader<ID, VAL> {
         this.shutdownAndExpedite(null);
     }
 
-    private DeleteOperationExceptionHandler getExceptionHandler(
-        @Nullable DeleteOperationExceptionHandler onException
+    private DeleteOperationExceptionHandler<ID> getExceptionHandler(
+        @Nullable DeleteOperationExceptionHandler<ID> onException
     ) {
         if (onException == null) {
-            return new DeleteOperationExceptionHandler() {
+            return new DeleteOperationExceptionHandler<>() {
 
                 @Override
                 public void handleDefault(Exception exc) {
@@ -166,11 +166,11 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    private AccessOperationExceptionHandler getExceptionHandler(
-        @Nullable AccessOperationExceptionHandler onException
+    private AccessOperationExceptionHandler<ID> getExceptionHandler(
+        @Nullable AccessOperationExceptionHandler<ID> onException
     ) {
         if (onException == null) {
-            return new AccessOperationExceptionHandler() {
+            return new AccessOperationExceptionHandler<>() {
 
                 @Override
                 public void handleDefault(Exception exc) {
@@ -183,11 +183,11 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    private SaveOperationExceptionHandler getExceptionHandler(
-        @Nullable SaveOperationExceptionHandler onException
+    private SaveOperationExceptionHandler<ID, VAL> getExceptionHandler(
+        @Nullable SaveOperationExceptionHandler<ID, VAL> onException
     ) {
         if (onException == null) {
-            return new SaveOperationExceptionHandler() {
+            return new SaveOperationExceptionHandler<>() {
 
                 @Override
                 public void handleDefault(Exception exc) {
@@ -201,8 +201,8 @@ public abstract class Loader<ID, VAL> {
     }
 
     public void delete(
-        ID identifier, 
-        @Nullable DeleteOperationExceptionHandler onException
+        ID identifier,
+        @Nullable DeleteOperationExceptionHandler<ID> onException
     ) {
         synchronized (this.lock) {
             this.checkShutdown();
@@ -230,8 +230,8 @@ public abstract class Loader<ID, VAL> {
 
     // Under Lock
     private void deleteReplaceTracker(
-        ID identifier, 
-        @NonNull DeleteOperationExceptionHandler onDeleteException
+        ID identifier,
+        @NonNull DeleteOperationExceptionHandler<ID> onDeleteException
     ) {
         DeletingStateTracker deleteTracker = new DeletingStateTracker();
         this.trackers.put(identifier, deleteTracker);
@@ -241,9 +241,9 @@ public abstract class Loader<ID, VAL> {
             try {
                 op.run();
             } catch (DeleteOperationException e) {
-                onDeleteException.handle(e);
+                onDeleteException.handle(e, identifier);
             } catch (RuntimeException e) {
-                onDeleteException.handle(e);
+                onDeleteException.handle(e, identifier);
             } finally {
                 this.runSync(() -> {
                     synchronized (this.lock) {
@@ -259,8 +259,8 @@ public abstract class Loader<ID, VAL> {
         @Nullable ID identifier,
         Accessor<ID, VAL> accessor,
         @Nullable Runnable onNotFound,
-        @NonNull AccessOperationExceptionHandler onAccessException,
-        @NonNull SaveOperationExceptionHandler onSaveException
+        @NonNull AccessOperationExceptionHandler<ID> onAccessException,
+        @NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException
     ) {
         StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
 
@@ -279,14 +279,15 @@ public abstract class Loader<ID, VAL> {
 
     // Under Lock
     // Only called while active
-    private void unloadOnSyncThread(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler onSaveException) {
+    private void unloadOnSyncThread(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException) {
         UnloadingStateTracker tracker = new UnloadingStateTracker(identifier, value);
         this.trackers.put(identifier, tracker);
 
         this.unloadAfterTracker(identifier, value, onSaveException, tracker);
     }
 
-    private void unloadFromAnyThread(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler onSaveException) {
+    // Under Lock
+    private void unloadFromAnyThread(ID identifier, VAL value, @NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException) {
         UnloadingStateTracker tracker = new UnloadingStateTracker(identifier, value);
         this.trackers.put(identifier, tracker);
 
@@ -298,9 +299,9 @@ public abstract class Loader<ID, VAL> {
     }
 
     private void unloadAfterTracker(
-        ID identifier, 
-        VAL value, 
-        @NonNull SaveOperationExceptionHandler onSaveException,
+        ID identifier,
+        VAL value,
+        @NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException,
         UnloadingStateTracker tracker
     ) {
         AtomicBoolean failedPart1 = new AtomicBoolean();
@@ -309,10 +310,10 @@ public abstract class Loader<ID, VAL> {
         try {
             op.runPart1();
         } catch (Part1SaveOperationException e) {
-            onSaveException.handlePart1(e);
+            onSaveException.handlePart1(e, identifier, value);
             failedPart1.set(true);
         } catch (RuntimeException e) {
-            onSaveException.handlePart1(e);
+            onSaveException.handlePart1(e, identifier, value);
             failedPart1.set(true);
         }
 
@@ -321,9 +322,9 @@ public abstract class Loader<ID, VAL> {
                 try {
                     op.runPart2();
                 } catch (Part2SaveOperationException e) {
-                    onSaveException.handlePart2(e);
+                    onSaveException.handlePart2(e, identifier, value);
                 } catch (RuntimeException e) {
-                    onSaveException.handlePart2(e);
+                    onSaveException.handlePart2(e, identifier, value);
                 }
             }
 
@@ -340,8 +341,8 @@ public abstract class Loader<ID, VAL> {
         @Nullable ID identifier,
         Accessor<ID, VAL> accessor,
         @Nullable Runnable onNotFound,
-        @NonNull AccessOperationExceptionHandler onAccessException,
-        @NonNull SaveOperationExceptionHandler onSaveException
+        @NonNull AccessOperationExceptionHandler<ID> onAccessException,
+        @NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException
     ) {
         this.runAsync(() -> {
             AccessOperation<ID, VAL> op = this.opAccess(identifier);
@@ -366,10 +367,10 @@ public abstract class Loader<ID, VAL> {
                             try {
                                 op.runPart2();
                             } catch (Part2AccessOperationException e) {
-                                onAccessException.handlePart2(e);
+                                onAccessException.handlePart2(e, op.id());
                                 return;
                             } catch (RuntimeException e) {
-                                onAccessException.handlePart2(e);
+                                onAccessException.handlePart2(e, op.id());
                                 return;
                             }
 
@@ -401,7 +402,7 @@ public abstract class Loader<ID, VAL> {
     private class PendingAccessRequest {
         Accessor<ID, VAL> accessor;
         @Nullable Runnable onNotFound;
-        SaveOperationExceptionHandler onSaveException;
+        SaveOperationExceptionHandler<ID, VAL> onSaveException;
     }
 
     public void access(
@@ -437,46 +438,46 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    private static class CompositeSaveOperationExceptionHandler implements SaveOperationExceptionHandler {
+    private static class CompositeSaveOperationExceptionHandler<ID, VAL> implements SaveOperationExceptionHandler<ID, VAL> {
 
-        private final List<SaveOperationExceptionHandler> handlers;
+        private final List<SaveOperationExceptionHandler<ID, VAL>> handlers;
 
-        CompositeSaveOperationExceptionHandler(List<SaveOperationExceptionHandler> handlers) {
+        CompositeSaveOperationExceptionHandler(List<SaveOperationExceptionHandler<ID, VAL>> handlers) {
             this.handlers = handlers;
         }
 
         @Override
-        public void handlePart1(Part1SaveOperationException exc) {
+        public void handlePart1(Part1SaveOperationException exc, ID id, VAL value) {
             var roller = new RuntimeExceptionRoller();
             for (var handler : this.handlers) {
-                roller.exec(() -> handler.handlePart1(exc));
+                roller.exec(() -> handler.handlePart1(exc, id, value));
             }
             roller.raise();
         }
 
         @Override
-        public void handlePart1(RuntimeException exc) {
+        public void handlePart1(RuntimeException exc, ID id, VAL value) {
             var roller = new RuntimeExceptionRoller();
             for (var handler : this.handlers) {
-                roller.exec(() -> handler.handlePart1(exc));
+                roller.exec(() -> handler.handlePart1(exc, id, value));
             }
             roller.raise();
         }
 
         @Override
-        public void handlePart2(Part2SaveOperationException exc) {
+        public void handlePart2(Part2SaveOperationException exc, ID id, VAL value) {
             var roller = new RuntimeExceptionRoller();
             for (var handler : this.handlers) {
-                roller.exec(() -> handler.handlePart2(exc));
+                roller.exec(() -> handler.handlePart2(exc, id, value));
             }
             roller.raise();
         }
 
         @Override
-        public void handlePart2(RuntimeException exc) {
+        public void handlePart2(RuntimeException exc, ID id, VAL value) {
             var roller = new RuntimeExceptionRoller();
             for (var handler : this.handlers) {
-                roller.exec(() -> handler.handlePart2(exc));
+                roller.exec(() -> handler.handlePart2(exc, id, value));
             }
             roller.raise();
         }
@@ -485,14 +486,14 @@ public abstract class Loader<ID, VAL> {
 
     private interface StateTracker<ID, VAL> {
         void access(
-            Accessor<ID, VAL> accessor, 
+            Accessor<ID, VAL> accessor,
             @Nullable Runnable onNotFound,
-            SaveOperationExceptionHandler onSaveException
+            SaveOperationExceptionHandler<ID, VAL> onSaveException
         );
         void delete(
-            @NonNull DeleteOperationExceptionHandler onDeleteException
+            @NonNull DeleteOperationExceptionHandler<ID> onDeleteException
         );
-        void shutdown(@NonNull SaveOperationExceptionHandler onSaveException);
+        void shutdown(@NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException);
     }
 
     private class ActiveStateTracker implements StateTracker<ID, VAL> {
@@ -511,9 +512,9 @@ public abstract class Loader<ID, VAL> {
 
         @Override
         public void access(
-            Accessor<ID, VAL> accessor, 
+            Accessor<ID, VAL> accessor,
             @Nullable Runnable onNotFound,
-            SaveOperationExceptionHandler onSaveException
+            SaveOperationExceptionHandler<ID, VAL> onSaveException
         ) {
             this.provisionAccess(accessor, onSaveException);
         }
@@ -530,7 +531,7 @@ public abstract class Loader<ID, VAL> {
                 roller.raise();
             } finally {
                 if (this.accessors.isEmpty()) {
-                    Loader.this.unloadOnSyncThread(this.identifier, this.value, new CompositeSaveOperationExceptionHandler(
+                    Loader.this.unloadOnSyncThread(this.identifier, this.value, new CompositeSaveOperationExceptionHandler<>(
                         pars.stream().map(par -> par.onSaveException).toList()
                     ));
                 }
@@ -542,8 +543,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         private boolean provisionAccess(
-            Accessor<ID, VAL> accessor, 
-            @NonNull SaveOperationExceptionHandler onSaveException
+            Accessor<ID, VAL> accessor,
+            @NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException
         ) {
             AtomicBoolean isDone = new AtomicBoolean();
             AtomicBoolean initSuccess = new AtomicBoolean();
@@ -610,7 +611,7 @@ public abstract class Loader<ID, VAL> {
 
         @Override
         public void delete(
-            @NonNull DeleteOperationExceptionHandler onDeleteException
+            @NonNull DeleteOperationExceptionHandler<ID> onDeleteException
         ) {
             Loader.this.deleteReplaceTracker(this.identifier, onDeleteException);
 
@@ -626,7 +627,7 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void shutdown(@NonNull SaveOperationExceptionHandler onSaveException) {
+        public void shutdown(@NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException) {
             this.isShuttingDown = true;
 
             try {
@@ -653,7 +654,7 @@ public abstract class Loader<ID, VAL> {
         private boolean pendingDelete = false;
         private boolean pendingShutdown = false;
 
-        private DeleteOperationExceptionHandler pendingDeleteExceptionHandler;
+        private DeleteOperationExceptionHandler<ID> pendingDeleteExceptionHandler;
 
         UnloadingStateTracker(ID identifier, VAL value) {
             this.identifier = identifier;
@@ -662,9 +663,9 @@ public abstract class Loader<ID, VAL> {
 
         @Override
         public void access(
-            Accessor<ID, VAL> accessor, 
+            Accessor<ID, VAL> accessor,
             @Nullable Runnable onNotFound,
-            SaveOperationExceptionHandler onSaveException
+            SaveOperationExceptionHandler<ID, VAL> onSaveException
         ) {
             var par = new PendingAccessRequest(); {
                 par.accessor = accessor;
@@ -705,13 +706,13 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void delete(@NonNull DeleteOperationExceptionHandler onDeleteException) {
+        public void delete(@NonNull DeleteOperationExceptionHandler<ID> onDeleteException) {
             this.pendingDelete = true;
             this.pendingDeleteExceptionHandler = onDeleteException;
         }
 
         @Override
-        public void shutdown(@NonNull SaveOperationExceptionHandler onSaveException) {
+        public void shutdown(@NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException) {
             this.pendingShutdown = true;
         }
 
@@ -721,20 +722,20 @@ public abstract class Loader<ID, VAL> {
 
         @Override
         public void access(
-            Accessor<ID, VAL> accessor, 
-            @Nullable Runnable onNotFound, 
-            SaveOperationExceptionHandler onSaveException
+            Accessor<ID, VAL> accessor,
+            @Nullable Runnable onNotFound,
+            SaveOperationExceptionHandler<ID, VAL> onSaveException
         ) {
             // Into the void...
         }
 
         @Override
-        public void delete(@NonNull DeleteOperationExceptionHandler onDeleteException) {
+        public void delete(@NonNull DeleteOperationExceptionHandler<ID> onDeleteException) {
             // Into the void...
         }
 
         @Override
-        public void shutdown(@NonNull SaveOperationExceptionHandler onSaveException) {
+        public void shutdown(@NonNull SaveOperationExceptionHandler<ID, VAL> onSaveException) {
             // Into the void...
         }
 
