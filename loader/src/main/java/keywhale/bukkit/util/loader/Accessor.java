@@ -3,27 +3,59 @@ package keywhale.bukkit.util.loader;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import org.jspecify.annotations.Nullable;
+
 public interface Accessor<ID, VAL> {
+
     public void init(Access<ID, VAL> access);
+
     public void cancel();
 
-    public static <ID, VAL> Accessor<ID, VAL> of (Consumer<Access<ID, VAL>> consumer) {
-        return new Accessor<ID, VAL>() {
+    public default void onNotFound() {}
 
-            @Override
-            public void init(Access<ID, VAL> access) {
+    public default boolean requiresSave() {
+        return true;
+    }
+
+    public static <ID, VAL> Accessor<ID, VAL> of(Consumer<Access<ID, VAL>> consumer) {
+        return of(
+            (access) -> {
                 consumer.accept(access);
-            }
+                return null;
+            },
+            null,
+            true
+        );
+    }
 
-            @Override
-            public void cancel() {
-                // Do nothing
-            }
-            
-        };
+    public static <ID, VAL> Accessor<ID, VAL> of(
+        Consumer<Access<ID, VAL>> consumer,
+        @Nullable Runnable onNotFound,
+        boolean requiresSave
+    ) {
+        return of(
+            (access) -> {
+                consumer.accept(access);
+                return null;
+            },
+            onNotFound,
+            requiresSave
+        );
     }
 
     public static <ID, VAL> Accessor<ID, VAL> of(Function<Access<ID, VAL>, Runnable> function) {
+        return of(
+            function,
+            null,
+            true
+        );
+    }
+
+    public static <ID, VAL> Accessor<ID, VAL> of(
+        Function<Access<ID, VAL>, Runnable> function,
+        @Nullable Runnable onNotFound,
+        boolean requiresSave
+    ) {
         return new Accessor<ID, VAL>() {
 
             private Runnable cancel;
@@ -38,6 +70,18 @@ public interface Accessor<ID, VAL> {
                 if (this.cancel != null) {
                     this.cancel.run();
                 }
+            }
+
+            @Override
+            public void onNotFound() {
+                if (onNotFound != null) {
+                    onNotFound.run();
+                }
+            }
+
+            @Override
+            public boolean requiresSave() {
+                return requiresSave;
             }
             
         };

@@ -94,22 +94,17 @@ public abstract class Loader<ID, VAL> {
 
     public void access(
         @Nullable ID identifier,
-        Accessor<ID, VAL> accessor,
-        @Nullable Runnable onNotFound
+        Accessor<ID, VAL> accessor
     ) {
         synchronized (this.lock) {
             this.checkShutdown();
 
             this.runSync(() -> {
                 synchronized (this.lock) {
-                    this.access0(identifier, accessor, onNotFound);
+                    this.access0(identifier, accessor);
                 }
             });
         }
-    }
-
-    public void access(@Nullable ID identifier, Accessor<ID, VAL> accessor) {
-        this.access(identifier, accessor, null);
     }
 
     public void shutdownAndExpedite() {
@@ -162,11 +157,11 @@ public abstract class Loader<ID, VAL> {
     }
 
     // Under Lock
-    private void deleteReplaceTracker(ID identifier, Collection<PendingAccessRequest> pars) {
+    private void deleteReplaceTracker(ID identifier, Collection<Accessor<ID, VAL>> accessors) {
         DeletingStateTracker deleteTracker = new DeletingStateTracker(identifier);
         this.trackers.put(identifier, deleteTracker);
 
-        deleteTracker.pendingAccess.addAll(pars);
+        deleteTracker.pendingAccess.addAll(accessors);
 
         this.runAsync(() -> {
             DeleteOperation op = this.opDelete(identifier);
@@ -189,15 +184,14 @@ public abstract class Loader<ID, VAL> {
     // Under Lock
     private void access0(
         @Nullable ID identifier,
-        Accessor<ID, VAL> accessor,
-        @Nullable Runnable onNotFound
+        Accessor<ID, VAL> accessor
     ) {
         StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
 
         if (tracker == null) {
-            this.accessOnUnknownState(identifier, accessor, onNotFound);
+            this.accessOnUnknownState(identifier, accessor);
         } else {
-            tracker.access(accessor, onNotFound);
+            tracker.access(accessor);
         }
     }
 
@@ -258,11 +252,11 @@ public abstract class Loader<ID, VAL> {
     // Under Lock
     private void accessAfterDelete(
         ID identifier,
-        Collection<PendingAccessRequest> pars
+        Collection<Accessor<ID, VAL>> accessors
     ) {
-        List<PendingAccessRequest> parList = new ArrayList<>(pars);
+        List<Accessor<ID, VAL>> accessorList = new ArrayList<>(accessors);
 
-        if (parList.isEmpty()) {
+        if (accessorList.isEmpty()) {
             return;
         }
 
@@ -301,14 +295,16 @@ public abstract class Loader<ID, VAL> {
 
                             var roller = new RuntimeExceptionRoller();
 
-                            for (PendingAccessRequest par : parList) {
-                                roller.exec(() -> activeTracker.provisionAccess(par.accessor));
+                            for (var accessor : accessorList) {
+                                roller.exec(() -> activeTracker.provisionAccess(accessor));
                             }
 
                             boolean doneDuringInit = activeTracker.accessors.isEmpty();
 
                             if (doneDuringInit) {
-                                Loader.this.unloadOnSyncThread(op.id(), op.value());
+                                if (activeTracker.anyRequiresSave) {
+                                    Loader.this.unloadOnSyncThread(op.id(), op.value());
+                                }
                             } else {
                                 Loader.this.trackers.put(op.id(), activeTracker);
                             }
@@ -317,8 +313,8 @@ public abstract class Loader<ID, VAL> {
                         } else {
                             var roller = new RuntimeExceptionRoller();
 
-                            for (PendingAccessRequest par : parList) {
-                                roller.exec(() -> tracker.access(par.accessor, par.onNotFound));
+                            for (var accessor : accessorList) {
+                                roller.exec(() -> tracker.access(accessor));
                             }
 
                             roller.raise();
@@ -330,8 +326,8 @@ public abstract class Loader<ID, VAL> {
                 this.runSync(() -> {
                     var roller = new RuntimeExceptionRoller();
 
-                    for (var par : parList) {
-                        roller.exec(par.onNotFound);
+                    for (var accessor : accessorList) {
+                        roller.exec(accessor::onNotFound);
                     }
 
                     roller.raise();
@@ -343,8 +339,7 @@ public abstract class Loader<ID, VAL> {
     // Under Lock
     private void accessOnUnknownState(
         @Nullable ID identifier,
-        Accessor<ID, VAL> accessor,
-        @Nullable Runnable onNotFound
+        Accessor<ID, VAL> accessor
     ) {
         this.runAsync(() -> {
             AccessOperation<ID, VAL> op = this.opAccess(identifier);
@@ -382,27 +377,22 @@ public abstract class Loader<ID, VAL> {
                             boolean doneDuringInit = activeTracker.provisionAccess(accessor);
 
                             if (doneDuringInit) {
-                                Loader.this.unloadOnSyncThread(op.id(), op.value());
+                                if (activeTracker.anyRequiresSave) {
+                                    Loader.this.unloadOnSyncThread(op.id(), op.value());
+                                }
                             } else {
                                 Loader.this.trackers.put(op.id(), activeTracker);
                             }
                         } else {
-                            tracker.access(accessor, onNotFound);
+                            tracker.access(accessor);
                         }
                     }
 
                 });
             } else {
-                if (onNotFound != null) {
-                    this.runSync(onNotFound);
-                }
+                this.runSync(accessor::onNotFound);
             }
         });
-    }
-
-    private class PendingAccessRequest {
-        Accessor<ID, VAL> accessor;
-        @Nullable Runnable onNotFound;
     }
 
     private static class RuntimeExceptionRoller {
@@ -432,7 +422,7 @@ public abstract class Loader<ID, VAL> {
     }
 
     private interface StateTracker<ID, VAL> {
-        void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound);
+        void access(Accessor<ID, VAL> accessor);
         void delete();
         void shutdown();
     }
@@ -445,11 +435,12 @@ public abstract class Loader<ID, VAL> {
         private final VAL value;
 
         private Substate<ID, VAL> substate = new ActiveSubstate();
+        private boolean anyRequiresSave = false;
 
         private final Set<Accessor<ID, VAL>> accessors = new HashSet<>();
 
         private static interface Substate<ID, VAL> {
-            public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound);
+            public void access(Accessor<ID, VAL> accessor);
             void delete();
             void shutdown();
             void done(Accessor<ID, VAL> accessor);
@@ -458,7 +449,7 @@ public abstract class Loader<ID, VAL> {
         private class ActiveSubstate implements Substate<ID, VAL> {
 
             @Override
-            public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
+            public void access(Accessor<ID, VAL> accessor) {
                 athis.provisionAccess(accessor);
             }
 
@@ -489,7 +480,11 @@ public abstract class Loader<ID, VAL> {
                 athis.accessors.remove(accessor);
 
                 if (athis.accessors.isEmpty()) {
-                    Loader.this.unloadFromAnyThread(athis.identifier, athis.value);
+                    if (athis.anyRequiresSave) {
+                        Loader.this.unloadFromAnyThread(athis.identifier, athis.value);
+                    } else {
+                        Loader.this.trackers.remove(athis.identifier);
+                    }
                 }
             }
 
@@ -497,16 +492,11 @@ public abstract class Loader<ID, VAL> {
 
         private class DeletingSubstate implements Substate<ID, VAL> {
 
-            private final List<PendingAccessRequest> pendingAccess = new ArrayList<>();
+            private final List<Accessor<ID, VAL>> pendingAccess = new ArrayList<>();
 
             @Override
-            public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
-                var par = new PendingAccessRequest(); {
-                    par.accessor = accessor;
-                    par.onNotFound = onNotFound;
-                }
-
-                this.pendingAccess.add(par);
+            public void access(Accessor<ID, VAL> accessor) {
+                this.pendingAccess.add(accessor);
             }
 
             @Override
@@ -531,7 +521,7 @@ public abstract class Loader<ID, VAL> {
         private class ShutdownSubstate implements Substate<ID, VAL> {
 
             @Override
-            public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {}
+            public void access(Accessor<ID, VAL> accessor) {}
 
             @Override
             public void delete() {}
@@ -544,7 +534,11 @@ public abstract class Loader<ID, VAL> {
                 athis.accessors.remove(accessor);
 
                 if (athis.accessors.isEmpty()) {
-                    Loader.this.unloadFromAnyThread(athis.identifier, athis.value);
+                    if (athis.anyRequiresSave) {
+                        Loader.this.unloadFromAnyThread(athis.identifier, athis.value);
+                    } else {
+                        Loader.this.trackers.remove(athis.identifier);
+                    }
                 }
             }
 
@@ -556,8 +550,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
-            this.substate.access(accessor, onNotFound);
+        public void access(Accessor<ID, VAL> accessor) {
+            this.substate.access(accessor);
         }
 
         private boolean provisionAccess(Accessor<ID, VAL> accessor) {
@@ -614,6 +608,10 @@ public abstract class Loader<ID, VAL> {
                 this.accessors.add(accessor);
             }
 
+            if (accessor.requiresSave()) {
+                this.anyRequiresSave = true;
+            }
+
             return doneDuringInit.get();
         }
 
@@ -634,7 +632,7 @@ public abstract class Loader<ID, VAL> {
         private final ID identifier;
         private final VAL value;
 
-        private final List<PendingAccessRequest> pendingAccess = new ArrayList<>();
+        private final List<Accessor<ID, VAL>> pendingAccess = new ArrayList<>();
 
         private boolean pendingDelete = false;
         private boolean pendingShutdown = false;
@@ -645,13 +643,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
-            var par = new PendingAccessRequest(); {
-                par.accessor = accessor;
-                par.onNotFound = onNotFound;
-            }
-
-            this.pendingAccess.add(par);
+        public void access(Accessor<ID, VAL> accessor) {
+            this.pendingAccess.add(accessor);
         }
 
         // Under Lock
@@ -669,14 +662,16 @@ public abstract class Loader<ID, VAL> {
 
                 var roller = new RuntimeExceptionRoller();
 
-                for (PendingAccessRequest par : this.pendingAccess) {
-                    roller.exec(() -> activeTracker.provisionAccess(par.accessor));
+                for (var accessor : this.pendingAccess) {
+                    roller.exec(() -> activeTracker.provisionAccess(accessor));
                 }
 
                 boolean doneDuringInit = activeTracker.accessors.isEmpty();
 
                 if (doneDuringInit) {
-                    Loader.this.unloadOnSyncThread(this.identifier, this.value);
+                    if (activeTracker.anyRequiresSave) {
+                        Loader.this.unloadOnSyncThread(this.identifier, this.value);
+                    }
                 } else {
                     Loader.this.trackers.put(this.identifier, activeTracker);
                 }
@@ -701,8 +696,8 @@ public abstract class Loader<ID, VAL> {
 
         private final ID identifier;
 
-        private final List<PendingAccessRequest> pendingAccess = new ArrayList<>();
-        
+        private final List<Accessor<ID, VAL>> pendingAccess = new ArrayList<>();
+
         private boolean pendingShutdown = false;
 
         public DeletingStateTracker(ID identifier) {
@@ -710,13 +705,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
-            var par = new PendingAccessRequest(); {
-                par.accessor = accessor;
-                par.onNotFound = onNotFound;
-            }
-
-            this.pendingAccess.add(par);
+        public void access(Accessor<ID, VAL> accessor) {
+            this.pendingAccess.add(accessor);
         }
 
         @Override
