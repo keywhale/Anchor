@@ -1,4 +1,4 @@
-package keywhale.bukkit.util.loader;
+package keywhale.util.loader;
 
 public interface Access<ID, VAL> {
     public VAL value();

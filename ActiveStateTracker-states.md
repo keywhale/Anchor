@@ -1,10 +1,12 @@
 # ActiveStateTracker State Machine
 
-| State | `access()` | `delete()` | `shutdown()` | `done()` not last | `done()` last |
+| State | `access(op, accessor)` | `delete(op)` | `shutdown()` | `done()` not last | `done()` last |
 |---|---|---|---|---|---|
-| **Active** | `provisionAccess()` | → **Cancelling→Delete**; call `cancel()` on all | → **Cancelling→Shutdown**; call `cancel()` on all | remove from `accessors` | if `anyRequiresSave`: `unloadFromAnyThread()`; else `trackers.remove()` |
-| **Cancelling→Delete** | queue in `pendingAccess` | no-op | → **Cancelling→Shutdown** | remove from `accessors` | `deleteReplaceTracker()`; re-queue `pendingAccess` via `accessAfterDelete` after delete completes |
-| **Cancelling→Shutdown** | no-op | no-op | no-op | remove from `accessors` | drop `pendingAccess`; if `anyRequiresSave`: `unloadFromAnyThread()`; else `trackers.remove()` |
+| **Active** | `provisionAccess(accessor)` | → **Cancelling→Delete**; call `cancel()` on all | → **Cancelling→Shutdown**; call `cancel()` on all | remove from `accessors` | if `anyRequiresSave`: start unload cycle; else `trackers.remove()` |
+| **Cancelling→Delete** | queue `AccessRequest(op, accessor)` in `pendingAccess` | no-op | → **Cancelling→Shutdown** | remove from `accessors` | `deleteReplaceTracker()` with `pendingAccess`; after delete completes, each request routed through `Loader.access(id, op, accessor)` |
+| **Cancelling→Shutdown** | no-op | no-op | no-op | remove from `accessors` | if `anyRequiresSave`: start unload cycle; else `trackers.remove()` |
+
+Unload cycle: create `UnloadingStateTracker`, put in `trackers`, call `save()`, call `unloadTracker.start()`.
 
 ## Edge Cases
 
