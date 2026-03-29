@@ -581,4 +581,24 @@ public abstract class Loader<ID, VAL> {
 
     protected abstract SaveOperation save(ID identifier, VAL value);
 
+    protected void saveActive() {
+        synchronized (this.lock) {
+            var roller = new RuntimeExceptionRoller();
+
+            for (StateTracker<ID, VAL> tracker : this.trackers.values()) {
+                if (tracker instanceof ActiveStateTracker activeTracker) {
+                    if (activeTracker.substate instanceof ActiveStateTracker.ActiveSubstate) {
+                        roller.exec(() -> {
+                            activeTracker.provisionAccess(Accessor.of((access) -> {
+                                this.save(access.id(), access.value()).start(access::done);
+                            }, null, false));
+                        });
+                    }
+                }
+            }
+
+            roller.raise();
+        }
+    }
+
 }
