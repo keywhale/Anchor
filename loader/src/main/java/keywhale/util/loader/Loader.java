@@ -586,14 +586,16 @@ public abstract class Loader<ID, VAL> {
             var roller = new RuntimeExceptionRoller();
 
             for (StateTracker<ID, VAL> tracker : this.trackers.values()) {
-                if (tracker instanceof ActiveStateTracker activeTracker) {
-                    if (activeTracker.substate instanceof ActiveStateTracker.ActiveSubstate) {
-                        roller.exec(() -> {
-                            activeTracker.provisionAccess(Accessor.of((access) -> {
-                                this.save(access.id(), access.value()).start(access::done);
-                            }, null, false));
-                        });
-                    }
+                if (
+                    tracker instanceof ActiveStateTracker activeTracker
+                    && activeTracker.substate instanceof ActiveStateTracker.ActiveSubstate
+                    && activeTracker.anyRequiresSave
+                ) {
+                    roller.exec(() -> {
+                        activeTracker.provisionAccess(Accessor.of((access) -> {
+                            this.save(access.id(), access.value()).start(access::done);
+                        }, null, false));
+                    });
                 }
             }
 
