@@ -249,3 +249,20 @@ Call `shutdown()` to stop accepting new requests and cancel all active accessors
 manager.shutdown();
 // wait for in-flight operations to complete...
 ```
+
+---
+
+## `ContextManager`
+
+A standalone utility for serializing access to a shared resource. Contexts are queued and run one at a time — the next context starts only after the current one calls `context.done()`.
+
+```java
+ContextManager cm = new ContextManager();
+
+cm.enter(context -> {
+    // exclusive access here
+    context.done(); // releases to next queued entry
+});
+```
+
+Calling `done()` more than once on the same context is a no-op.
