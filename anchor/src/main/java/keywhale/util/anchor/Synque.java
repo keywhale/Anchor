@@ -1,12 +1,15 @@
 package keywhale.util.anchor;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
-public class ContextManager {
+public class Synque {
 
+    private final Object defaultKey = new Object();
     private final Object lock = new Object();
-    private ContextTracker tracker = null;
+    private final Map<Object, ContextTracker> trackers = new HashMap<>();
 
     public interface Context {
         public void done();
@@ -21,8 +24,12 @@ public class ContextManager {
             this.start.accept(this.ctx);
         }
     }
-    
+
     public void enter(Consumer<Context> start) {
+        this.enter(defaultKey, start);
+    }
+    
+    public void enter(Object key, Consumer<Context> start) {
         synchronized (this.lock) {
             AtomicBoolean done = new AtomicBoolean();
             ContextTracker trk = new ContextTracker();
@@ -33,19 +40,19 @@ public class ContextManager {
                     done.set(true);
                     
                     if (trk.next == null) {
-                        this.tracker = null;
+                        this.trackers.remove(key);
                     } else {
                         trk.next.start();
                     }
                 }
             };
 
-            if (this.tracker == null) {
-                this.tracker = trk;
+            if (this.trackers.get(key) == null) {
+                this.trackers.put(key, trk);
                 trk.start();
             } else {
-                this.tracker.next = trk;
-                this.tracker = trk;
+                this.trackers.get(key).next = trk;
+                this.trackers.put(key, trk);
             }
         }
     }
