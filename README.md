@@ -22,7 +22,7 @@ Requests that arrive while a value is loading, unloading, or deleting are queued
 
 ### Threading Model
 
-Operations own their threading. `AccessManager` itself never schedules work — it only receives callbacks. For `AccessOperation` and `SaveOperation`, the thread on which the callback is fired determines the thread that `Accessor.init` runs on for any pending accesses. For `DeleteOperation`, pending accesses are re-issued via their own `AccessOperation` after the delete completes, so the callback thread does not affect where `Accessor.init` runs.
+Operations own their threading. `AccessManager` itself never schedules work — it only reacts to future completions. The thread that completes the `CompletableFuture` returned by `start()` is the thread on which `Accessor.init` runs for any pending accesses, except for `DeleteOperation`: pending accesses there are re-issued via their own `AccessOperation` after the delete completes, so the completion thread does not affect where `Accessor.init` runs.
 
 ---
 
@@ -40,47 +40,48 @@ public class PlayerManager {
     public PlayerManager(Database database, Executor executor) {
         this.database = database;
         this.executor = executor;
-        this.manager = new AccessManager<>((id, data) -> callback -> {
-            executor.execute(() -> {
-                database.save(id, data);
-                callback.run();
-            });
-        });
+        this.manager = new AccessManager<>((id, data) -> () ->
+            CompletableFuture.runAsync(() -> database.save(id, data), executor)
+        );
     }
 
     public void loadPlayer(UUID id, AccessManager.Accessor<UUID, PlayerData> accessor) {
-        this.manager.access(id, (callback, onNotFound) -> {
+        this.manager.access(id, () -> {
+            CompletableFuture<AccessManager.AccessOperation.Result<UUID, PlayerData>> future = new CompletableFuture<>();
             executor.execute(() -> {
                 PlayerData data = database.load(id);
                 if (data == null) {
-                    onNotFound.run();
+                    future.completeExceptionally(new AccessManager.AccessOperation.NotFound());
                 } else {
-                    callback.accept(id, data);
+                    future.complete(new AccessManager.AccessOperation.Result<>(id, data));
                 }
             });
+            return future;
         }, accessor);
     }
 
     public void createPlayer(AccessManager.Accessor<UUID, PlayerData> accessor) {
-        this.manager.access((callback, onNotFound) -> {
+        this.manager.access(() -> {
+            CompletableFuture<AccessManager.AccessOperation.Result<UUID, PlayerData>> future = new CompletableFuture<>();
             executor.execute(() -> {
                 PlayerData data = database.create();
-                callback.accept(data.getId(), data);
-                // onNotFound is null — creation can never produce not-found
+                future.complete(new AccessManager.AccessOperation.Result<>(data.getId(), data));
             });
+            return future;
         }, accessor);
     }
 
     public void deletePlayer(UUID id, AccessManager.Deleter deleter) {
-        this.manager.delete(id, (onDeleted, onNotFound) -> {
+        this.manager.delete(id, () -> {
+            CompletableFuture<Void> future = new CompletableFuture<>();
             executor.execute(() -> {
-                boolean existed = database.delete(id);
-                if (existed) {
-                    onDeleted.run();
+                if (database.delete(id)) {
+                    future.complete(null);
                 } else {
-                    onNotFound.run();
+                    future.completeExceptionally(new AccessManager.DeleteOperation.NotFound());
                 }
             });
+            return future;
         }, deleter);
     }
 
@@ -100,7 +101,7 @@ public class PlayerManager {
 
 ### `access(AccessOperation, Accessor)` — creation / unknown-state
 
-Fires the operation immediately without checking the cache. Use when the ID is not yet known (e.g. creating a new record). If the operation's callback fires with an ID already in the cache, a `CacheCollisionException` is thrown.
+Fires the operation immediately without checking the cache. Use when the ID is not yet known (e.g. creating a new record). If the operation completes with an ID already in the cache, the accessor receives `AttemptFailedException.Other` wrapping a `CacheCollisionException`.
 
 ### `access(ID, AccessOperation, Accessor)` — known-ID
 
@@ -108,62 +109,59 @@ Checks the cache first. If the value is already active, `Accessor.init` is calle
 
 ### `delete(ID, DeleteOperation)` / `delete(ID, DeleteOperation, Deleter)`
 
-Cancels all active accessors for the ID and runs the delete operation. Accesses that arrive while the delete is in progress are queued and re-issued once complete. The optional `Deleter` is notified of the outcome — `done()` if the record was deleted, `onNotFound()` if nothing matched.
+Cancels all active accessors for the ID and runs the delete operation. Accesses that arrive while the delete is in progress are queued and re-issued once complete. The optional `Deleter` receives `done()` if the record was deleted, or `fail(AttemptFailedException.NotFound)` if nothing matched.
 
-Both `access` overloads and `delete` throw `ShuttingDownException` if called after `shutdown()`.
+If called after `shutdown()`, the accessor or deleter immediately receives `AttemptFailedException.ShuttingDown`.
 
 ---
 
 ## Step 3: Operations
 
-Operations are functional interfaces and can be implemented as lambdas. Each fires a callback when complete, on whichever thread the implementation chooses.
+Operations are functional interfaces — implement them as lambdas. Each returns a `CompletableFuture` that resolves when the operation is complete.
 
 ### `AccessOperation<ID, VAL>`
 
-Dual-purpose: implementations may load an existing value or create a new one. The callback thread determines where `Accessor.init` runs.
+Returns `CompletableFuture<Result<ID, VAL>>`. Complete exceptionally with `AccessOperation.NotFound` if the value does not exist, or with any `RuntimeException` to signal an error.
 
 ```java
-(callback, onNotFound) -> {
+() -> {
+    CompletableFuture<AccessManager.AccessOperation.Result<UUID, PlayerData>> future = new CompletableFuture<>();
     executor.execute(() -> {
         PlayerData data = database.load(id);
         if (data == null) {
-            onNotFound.run();
+            future.completeExceptionally(new AccessManager.AccessOperation.NotFound());
         } else {
-            callback.accept(id, data); // Accessor.init runs on this thread
+            future.complete(new AccessManager.AccessOperation.Result<>(id, data));
         }
     });
+    return future;
 }
 ```
 
-Pass `null` for `onNotFound` if creation is guaranteed (not-found is impossible).
-
 ### `SaveOperation`
 
-The callback thread determines where `Accessor.init` runs for any accesses pending while the save was in progress.
+Returns `CompletableFuture<Void>`. Error handling is the caller's responsibility — `AccessManager` calls `start()` and proceeds regardless of outcome.
 
 ```java
-callback -> {
-    executor.execute(() -> {
-        database.save(id, data);
-        callback.run(); // Accessor.init for pending accesses runs on this thread
-    });
-}
+(id, data) -> () ->
+    CompletableFuture.runAsync(() -> database.save(id, data), executor)
 ```
 
 ### `DeleteOperation`
 
-Pending accesses are re-issued via their `AccessOperation` after the delete completes, so the callback thread does not affect where `Accessor.init` runs. Call `callback` if the record was removed, `onNotFound` if nothing matched.
+Returns `CompletableFuture<Void>`. Complete exceptionally with `DeleteOperation.NotFound` if nothing matched, or with any `RuntimeException` to signal an error.
 
 ```java
-(callback, onNotFound) -> {
+() -> {
+    CompletableFuture<Void> future = new CompletableFuture<>();
     executor.execute(() -> {
-        boolean existed = database.delete(id);
-        if (existed) {
-            callback.run();
+        if (database.delete(id)) {
+            future.complete(null);
         } else {
-            onNotFound.run();
+            future.completeExceptionally(new AccessManager.DeleteOperation.NotFound());
         }
     });
+    return future;
 }
 ```
 
@@ -172,20 +170,10 @@ Pending accesses are re-issued via their `AccessOperation` after the delete comp
 Optional callback passed to `delete(ID, DeleteOperation, Deleter)` to observe the outcome.
 
 ```java
-manager.deletePlayer(playerId, new AccessManager.Deleter() {
-    public void done() {
-        System.out.println("Player deleted");
-    }
-    public void onNotFound() {
-        System.out.println("Player not found");
-    }
-});
-```
-
-`onNotFound()` has a default no-op implementation, so a lambda works if you only care about the success case:
-
-```java
-manager.deletePlayer(playerId, () -> System.out.println("Player deleted"));
+AccessManager.Deleter.of(
+    () -> System.out.println("Player deleted"),
+    exc -> System.out.println("Failed: " + exc)
+);
 ```
 
 ---
@@ -193,6 +181,17 @@ manager.deletePlayer(playerId, () -> System.out.println("Player deleted"));
 ## Step 4: `Accessor`
 
 An `Accessor` receives an `Access` object when the value is ready and holds the access until `access.done()` is called, at which point the `AccessManager` knows the accessor is finished and may begin saving.
+
+If the access cannot be granted, `fail(AttemptFailedException)` is called instead of `init`.
+
+### `AttemptFailedException`
+
+| Subtype | Meaning |
+|---|---|
+| `NotFound` | The value does not exist in storage |
+| `ShuttingDown` | The manager is shutting down |
+| `Deleting` | A delete is in progress for the requested key |
+| `Other` | The operation threw a `RuntimeException` (retrieve via `getCause()`) |
 
 ### `Access<ID, VAL>`
 
@@ -206,38 +205,32 @@ An `Accessor` receives an `Access` object when the value is ready and holds the 
 ### Simple one-shot
 
 ```java
-manager.loadPlayer(playerId, AccessManager.Accessor.of(access -> {
-    access.value().setCoins(access.value().getCoins() + 100);
-    access.save();
-    access.done();
-}));
+manager.loadPlayer(playerId, AccessManager.Accessor.of(
+    access -> {
+        access.value().setCoins(access.value().getCoins() + 100);
+        access.save();
+        access.done();
+        return null; // no cancel callback needed
+    },
+    exc -> System.out.println("Failed to load player: " + exc)
+));
 ```
 
 ### Long-lived (with cancel)
 
 ```java
-manager.loadPlayer(playerId, AccessManager.Accessor.of(access -> {
-    activeSessions.put(playerId, new PlayerSession(access.value()));
-
-    // Return a cancel callback — called on delete or shutdown
-    return () -> activeSessions.remove(playerId);
-}));
+manager.loadPlayer(playerId, AccessManager.Accessor.of(
+    access -> {
+        activeSessions.put(playerId, new PlayerSession(access.value()));
+        return () -> activeSessions.remove(playerId); // cancel callback
+    },
+    exc -> System.out.println("Failed to load player: " + exc)
+));
 
 // Later, when done:
 activeSessions.remove(playerId);
 access.done();
 ```
-
-### `onNotFound`
-
-```java
-manager.loadPlayer(playerId, AccessManager.Accessor.of(
-    access -> { /* ... */ },
-    () -> System.out.println("Player not found") // onNotFound
-));
-```
-
-- **`onNotFound`** — called if the value does not exist in storage. Defaults to a no-op.
 
 ---
 
@@ -252,16 +245,23 @@ manager.shutdown();
 
 ---
 
-## `ContextManager`
+## Synque
 
-A standalone utility for serializing access to a shared resource. Contexts are queued and run one at a time — the next context starts only after the current one calls `context.done()`.
+A standalone utility for serializing access to a shared resource. Contexts are queued and run one at a time — the next context starts only after the current one calls `context.done()`. Supports keyed queues so independent resources can be serialized separately.
 
 ```java
-ContextManager cm = new ContextManager();
+Synque synque = new Synque();
 
-cm.enter(context -> {
+// Default queue
+synque.enter(context -> {
     // exclusive access here
-    context.done(); // releases to next queued entry
+    context.done();
+});
+
+// Keyed queue — independent from other keys
+synque.enter(someKey, context -> {
+    // exclusive access for this key
+    context.done();
 });
 ```
 
